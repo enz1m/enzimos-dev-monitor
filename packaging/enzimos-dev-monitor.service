@@ -1,0 +1,18 @@
+[Unit]
+Description=enzimOS developer monitor (started on demand)
+
+[Service]
+Type=dbus
+BusName=org.enzimos.DevMonitor1
+ExecStart=/usr/lib/enzimos/enzimos-dev-monitor
+# Exits by itself after a minute without calls; the next call starts it again.
+Restart=no
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+MemoryHigh=48M
+MemoryMax=96M
+CPUWeight=20
+Nice=10

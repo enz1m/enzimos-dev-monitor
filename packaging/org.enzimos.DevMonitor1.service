@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.enzimos.DevMonitor1
+Exec=/usr/lib/enzimos/enzimos-dev-monitor
+SystemdService=enzimos-dev-monitor.service
