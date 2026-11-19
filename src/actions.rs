@@ -6,7 +6,7 @@ use std::io;
 use serde::Serialize;
 
 use crate::describe::session_boundary;
-use crate::procfs::{Table, current_uid, read_stat};
+use crate::procfs::{Table, current_uid, process_uid, read_stat};
 
 const PROTECTED: &[&str] = &[
     "systemd",
@@ -22,6 +22,7 @@ const PROTECTED: &[&str] = &[
     "dbus-daemon",
     "gnome-keyring-d",
     "oo7-daemon",
+    "oo7-daemon-logi", // Linux task name for oo7-daemon-login.
     "xdg-desktop-por",
     "enzimos-dev-mon",
 ];
@@ -79,7 +80,7 @@ pub fn signal(pid: u32, start_time: u64, scope: Scope, force: bool) -> io::Resul
             report.skipped.push(Skipped { pid: member, reason });
             continue;
         }
-        match send(member, entry.start_time, number) {
+        match send(member, entry.start_time, uid, number) {
             Ok(()) => report.delivered.push(member),
             Err(error) => report.skipped.push(Skipped { pid: member, reason: error.to_string() }),
         }
@@ -103,7 +104,7 @@ fn refusal(table: &Table, pid: u32, uid: u32) -> Option<String> {
 }
 
 #[allow(unsafe_code, reason = "Linux syscall ABI (close, syscall).")]
-fn send(pid: u32, start_time: u64, signal: i32) -> io::Result<()> {
+fn send(pid: u32, start_time: u64, uid: u32, signal: i32) -> io::Result<()> {
     // SAFETY: pidfd_open takes scalar arguments and returns a new descriptor.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) } as i32;
     if fd < 0 {
@@ -111,7 +112,10 @@ fn send(pid: u32, start_time: u64, signal: i32) -> io::Result<()> {
     }
     // The pidfd now pins the process; confirm it is still the one from the snapshot.
     let same = read_stat(pid).is_some_and(|entry| {
-        entry.start_time == start_time && !PROTECTED.contains(&entry.comm.as_str()) && !session_boundary(&entry)
+        entry.start_time == start_time
+            && process_uid(pid) == Some(uid)
+            && !PROTECTED.contains(&entry.comm.as_str())
+            && !session_boundary(&entry)
     });
     let result = if same {
         // SAFETY: fd is live; null siginfo requests the kernel-generated signal.
@@ -168,7 +172,7 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert!(signal(1, Table::scan().entries.get(&1).map_or(0, |e| e.start_time), Scope::Process, true).is_err());
-        for name in ["oo7-daemon", "enz-hyprland"] {
+        for name in ["oo7-daemon", "oo7-daemon-logi", "enz-hyprland"] {
             let mut protected = Command::new("sh")
                 .args(["-c", "printf '%s' \"$1\" > /proc/self/comm; read answer", "fixture", name])
                 .stdin(std::process::Stdio::piped())

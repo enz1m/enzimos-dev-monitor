@@ -113,7 +113,7 @@ impl Table {
                     // The kernel reports root as the /proc owner of non-dumpable
                     // tasks (setuid programs, ssh-agent, gpg-agent); take the real
                     // UID from `status` for those only, keeping the scan cheap.
-                    entry.uid = if meta.uid() == 0 { status_uid(&item.path()).unwrap_or(0) } else { meta.uid() };
+                    entry.uid = observed_uid(&item.path(), meta.uid());
                     entries.insert(pid, entry);
                 }
             }
@@ -165,6 +165,15 @@ impl Table {
         }
         result
     }
+}
+
+fn observed_uid(directory: &Path, owner: u32) -> u32 {
+    if owner == 0 { status_uid(directory).unwrap_or(0) } else { owner }
+}
+
+pub(crate) fn process_uid(pid: u32) -> Option<u32> {
+    let directory = proc_path(pid, "");
+    Some(observed_uid(&directory, fs::metadata(&directory).ok()?.uid()))
 }
 
 pub fn proc_path(pid: u32, name: &str) -> PathBuf {
