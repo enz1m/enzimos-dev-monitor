@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shutil
 import signal
 import socketserver
 import subprocess
@@ -98,7 +99,7 @@ def main():
         address = bus.stdout.readline().strip()
         environment = {**os.environ, 'DBUS_SESSION_BUS_ADDRESS': address, 'XDG_RUNTIME_DIR': str(runtime)}
         environment.pop('DOCKER_HOST', None)
-        service = subprocess.Popen([SERVICE], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        service = subprocess.Popen([SERVICE, '--control-client', shutil.which('busctl')], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         listener = subprocess.Popen([sys.executable, '-c', 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(); print(s.getsockname()[1],flush=True); time.sleep(90)'], cwd=project,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         listener_port = int(listener.stdout.readline())
@@ -159,6 +160,11 @@ def main():
                 time.sleep(.25)
             assert state['closed'] >= 1, state
             assert state['lists'] == lists, state
+            refused = subprocess.run(['dbus-send', '--bus=' + address, '--print-reply', '--dest=org.enzimos.DevMonitor1', '/org/enzimos/DevMonitor1',
+                                      'org.enzimos.DevMonitor1.Signal', f'uint32:{listener.pid}', f'uint64:{start}', 'boolean:false', 'boolean:false'],
+                                     capture_output=True, text=True, timeout=5)
+            assert refused.returncode != 0 and 'AccessDenied' in refused.stderr, refused
+            assert listener.poll() is None, 'unadmitted caller signalled a process'
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 slow_control = pool.submit(call, 'Container', 'ssss', 'podman', str(endpoint), identifier, 'stop')
                 assert control_entered.wait(3)
@@ -184,7 +190,7 @@ def main():
                 os.waitpid(pid, 0)
             print(json.dumps({'status': 'PASS', 'fast_calls_during_slow_engine_seconds': round(latency, 3),
                               'concurrent_clients': 20, 'distinct_scans': len(scan_ids), 'idle_event_connections_closed': state['closed'],
-                              'project_grouping': True, 'shortcut_dry_run': True, 'interactive_shell_refused': True,
+                              'project_grouping': True, 'unadmitted_control_refused': True, 'shortcut_dry_run': True, 'interactive_shell_refused': True,
                               'signal_during_container_action_seconds': round(signal_latency, 3)}))
         finally:
             stop(listener)

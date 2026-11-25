@@ -1,11 +1,13 @@
 use devmon::actions::{self, Scope};
+use devmon::caller::{self, Access, Client};
 use devmon::monitor::Options;
 use devmon::procfs::{Table, current_uid};
 use devmon::worker::{Activity, Engines, Lane, Ports};
 use devmon::{engines, inspect, shortcuts};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use zbus::fdo;
+use zbus::{fdo, message::Header};
 
 const NAME: &str = "org.enzimos.DevMonitor1";
 const PATH: &str = "/org/enzimos/DevMonitor1";
@@ -17,6 +19,24 @@ struct Service {
     controls: Lane<()>,
     signals: Lane<()>,
     activity: Arc<Activity>,
+    control_client: PathBuf,
+}
+
+impl Service {
+    async fn admit(&self, connection: &zbus::Connection, header: &Header<'_>, access: Access) -> fdo::Result<()> {
+        let refused = || fdo::Error::AccessDenied("caller not admitted".into());
+        let sender = header.sender().ok_or_else(refused)?;
+        let credentials =
+            fdo::DBusProxy::new(connection).await?.get_connection_credentials(sender.clone().into()).await?;
+        let (Some(pid), Some(uid)) = (credentials.process_id(), credentials.unix_user_id()) else {
+            return Err(refused());
+        };
+        if uid != current_uid() {
+            return Err(refused());
+        }
+        let client = (access == Access::Control).then(|| Client::installed(&self.control_client)).flatten();
+        caller::admit(Path::new("/proc"), pid, uid, access, client).map_err(failed)
+    }
 }
 
 fn json<T: serde::Serialize>(value: &T) -> fdo::Result<String> {
@@ -41,8 +61,16 @@ fn endpoint(engine: &str, socket: &str) -> std::io::Result<engines::Endpoint> {
 
 #[zbus::interface(name = "org.enzimos.DevMonitor1")]
 impl Service {
-    async fn snapshot(&self, include_system: bool, include_udp: bool, containers: bool) -> fdo::Result<String> {
+    async fn snapshot(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        include_system: bool,
+        include_udp: bool,
+        containers: bool,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Observe).await?;
         let options = Options { include_system, include_udp, containers };
         let mut snapshot = (*self.ports.call(Ports::snapshot).await.map_err(failed)?).clone();
         let engines = if containers { self.engines.call(Engines::snapshot).await.map_err(failed)? } else { Vec::new() };
@@ -50,8 +78,14 @@ impl Service {
         json(&snapshot)
     }
 
-    async fn lookup(&self, port: u16) -> fdo::Result<String> {
+    async fn lookup(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        port: u16,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Observe).await?;
         let mut snapshot = (*self.ports.call(Ports::snapshot).await.map_err(failed)?).clone();
         snapshot.attach(
             self.engines.call(Engines::snapshot).await.map_err(failed)?,
@@ -62,13 +96,29 @@ impl Service {
         json(&serde_json::json!({"ports":ports,"processes":processes,"warnings":snapshot.warnings}))
     }
 
-    async fn inspect(&self, pid: u32, start_time: u64) -> fdo::Result<String> {
+    async fn inspect(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        pid: u32,
+        start_time: u64,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Observe).await?;
         json(&self.queries.call(move |()| inspect::inspect(pid, start_time)).await.map_err(failed)?)
     }
 
-    async fn signal(&self, pid: u32, start_time: u64, tree: bool, force: bool) -> fdo::Result<String> {
+    async fn signal(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        pid: u32,
+        start_time: u64,
+        tree: bool,
+        force: bool,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Control).await?;
         json(
             &self
                 .signals
@@ -80,8 +130,17 @@ impl Service {
         )
     }
 
-    async fn container(&self, engine: String, socket: String, id: String, action: String) -> fdo::Result<()> {
+    async fn container(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        engine: String,
+        socket: String,
+        id: String,
+        action: String,
+    ) -> fdo::Result<()> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Control).await?;
         let endpoint = self
             .controls
             .call(move |()| {
@@ -101,18 +160,42 @@ impl Service {
         Ok(())
     }
 
-    async fn container_logs(&self, engine: String, socket: String, id: String, tail: u32) -> fdo::Result<String> {
+    async fn container_logs(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        engine: String,
+        socket: String,
+        id: String,
+        tail: u32,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Control).await?;
         self.queries.call(move |()| engines::logs(&endpoint(&engine, &socket)?, &id, tail)).await.map_err(failed)
     }
 
-    async fn shortcuts(&self, pid: u32, start_time: u64) -> fdo::Result<String> {
+    async fn shortcuts(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        pid: u32,
+        start_time: u64,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Observe).await?;
         json(&self.queries.call(move |()| shortcuts::for_process(pid, start_time)).await.map_err(failed)?)
     }
 
-    async fn container_shortcuts(&self, engine: String, socket: String, id: String) -> fdo::Result<String> {
+    async fn container_shortcuts(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        engine: String,
+        socket: String,
+        id: String,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Observe).await?;
         json(
             &self
                 .queries
@@ -122,8 +205,16 @@ impl Service {
         )
     }
 
-    async fn process_logs(&self, pid: u32, start_time: u64, tail: u32) -> fdo::Result<String> {
+    async fn process_logs(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(header)] header: Header<'_>,
+        pid: u32,
+        start_time: u64,
+        tail: u32,
+    ) -> fdo::Result<String> {
         let _active = self.activity.enter().map_err(failed)?;
+        self.admit(connection, &header, Access::Control).await?;
         json(&self.queries.call(move |()| shortcuts::process_logs(pid, start_time, tail)).await.map_err(failed)?)
     }
 
@@ -131,6 +222,16 @@ impl Service {
     fn version(&self) -> u32 {
         let _active = self.activity.enter();
         2
+    }
+}
+
+// `--control-client PATH` names another root-owned control client in place of the Shell.
+fn control_client() -> Result<PathBuf, String> {
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next(), args.next()) {
+        (None, ..) => Ok(PathBuf::from(caller::SHELL)),
+        (Some(flag), Some(path), None) if flag == "--control-client" => Ok(PathBuf::from(path)),
+        _ => Err("usage: enzimos-dev-monitor [--control-client PATH]".into()),
     }
 }
 
@@ -143,6 +244,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         controls: Lane::new("controls", (), |()| {})?,
         signals: Lane::new("signals", (), |()| {})?,
         activity: activity.clone(),
+        control_client: control_client()?,
     };
     let connection = zbus::blocking::connection::Builder::session()?.name(NAME)?.serve_at(PATH, service)?.build()?;
     activity.wait_idle(Duration::from_secs(60));

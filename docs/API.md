@@ -25,6 +25,13 @@ uniquely before a control is issued. Every process action carries the start time
 from the displayed row. Clients must not replace that identity with a fresh
 start time simply to make a failed action succeed.
 
+Callers must run as the service's user outside a Flatpak sandbox. `Signal`,
+`Container`, `ContainerLogs` and `ProcessLogs` additionally require the caller
+process itself to run the installed Shell (`/usr/lib/enzui/bin/enzui-shell`, or
+the root-owned executable named by the service's `--control-client` option);
+other callers receive `org.freedesktop.DBus.Error.AccessDenied`. The `Version`
+property is open to every caller.
+
 ## Scheduling and errors
 
 `include_system` adds other users' and system socket rows; it does not grant

@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod bindings;
+pub mod caller;
 pub mod command;
 pub mod container;
 pub mod describe;
